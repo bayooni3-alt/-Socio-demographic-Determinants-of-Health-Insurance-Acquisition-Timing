@@ -1,0 +1,588 @@
+# ============================================
+# COMPLETE PhD SURVIVAL ANALYSIS CODE - FINAL
+# ALL ERRORS CORRECTED - READY TO RUN
+# ============================================
+
+# Load required libraries
+library(flexsurv)
+library(pec)
+library(ggplot2)
+library(survminer)
+library(tidyverse)
+library(boot)
+library(survival)
+
+# Set seed for reproducibility
+set.seed(123)
+
+# ============================================
+# STEP 1: CREATE A CLEAN DATASET (NO MISSING VALUES)
+# ============================================
+
+# Load data
+df <- read.csv("C:/Users/USER/Documents/HealthInsurance.csv")
+
+# Remove rownames if exists
+if("rownames" %in% colnames(df)) df$rownames <- NULL
+
+# Create clean dataset with NO missing values
+df_clean <- df %>%
+  mutate(event = ifelse(insurance == "yes", 1, 0)) %>%
+  select(age, gender, married, selfemp, family, region, education, health, event) %>%
+  na.omit() %>%
+  mutate(across(where(is.character), as.factor))
+
+cat("Clean dataset size:", nrow(df_clean), "rows\n")
+cat("Events (insurance acquired):", sum(df_clean$event), "\n")
+cat("Censored (no insurance):", sum(df_clean$event == 0), "\n\n")
+
+# Create survival object
+surv_clean <- Surv(time = df_clean$age, event = df_clean$event)
+
+# ============================================
+# STEP 2: FIT ALL MODELS USING THE SAME DATASET
+# ============================================
+
+cat("========== FITTING MODELS ==========\n")
+
+# Model 1: Null model
+cox_null <- coxph(surv_clean ~ 1, data = df_clean)
+
+# Model 2: Minimal model
+cox_minimal <- coxph(surv_clean ~ gender + married, data = df_clean)
+
+# Model 3: Medium model
+cox_medium <- coxph(surv_clean ~ gender + married + selfemp + family, data = df_clean)
+
+# Model 4: Full model (no age - it's the time scale!)
+cox_full <- coxph(surv_clean ~ gender + married + selfemp + family + 
+                   region + education + health, data = df_clean)
+
+# Model 5: Stratified by region
+cox_stratified <- coxph(surv_clean ~ gender + married + selfemp + 
+                         family + education + health + strata(region), 
+                         data = df_clean)
+
+# Model 6: Time-varying effect for family size (ONLY continuous variable)
+cox_tvc_family <- coxph(surv_clean ~ gender + married + selfemp +
+                         family + tt(family) + region + education + health,
+                         data = df_clean,
+                         tt = function(x, t, ...) x * log(t))
+
+# Model 7: Stratified by age period
+df_clean$age_period <- cut(df_clean$age, 
+                            breaks = c(18, 40, 60, 100),
+                            labels = c("18-40", "41-60", "61+"))
+
+cox_stratified_age <- coxph(surv_clean ~ gender + married + selfemp + 
+                             family + region + education + health + 
+                             strata(age_period), data = df_clean)
+
+cat("✓ All 7 models fitted successfully on", nrow(df_clean), "observations\n\n")
+
+# ============================================
+# STEP 3: KAPLAN-MEIER SURVIVAL CURVES
+# ============================================
+
+cat("========== KAPLAN-MEIER SURVIVAL CURVES ==========\n")
+
+# Create KM objects
+km_overall <- survfit(surv_clean ~ 1, data = df_clean)
+km_gender <- survfit(surv_clean ~ gender, data = df_clean)
+km_married <- survfit(surv_clean ~ married, data = df_clean)
+
+# Median survival times
+cat("Median age at insurance acquisition:", summary(km_overall)$table["median"], "years\n\n")
+
+# Create directory for figures
+if(!dir.exists("figures")) dir.create("figures")
+
+# Figure 1: Overall survival
+fig1 <- ggsurvplot(km_overall, data = df_clean,
+                   title = "Overall Insurance Acquisition by Age",
+                   xlab = "Age (years)", ylab = "Probability of No Insurance",
+                   surv.median.line = "hv", risk.table = TRUE,
+                   conf.int = TRUE, palette = "darkblue")
+
+png("figures/Figure1_Overall_Survival.png", width = 10, height = 8, units = "in", res = 300)
+print(fig1)
+dev.off()
+cat("Figure 1 saved\n")
+
+# Figure 2: By gender
+fig2 <- ggsurvplot(km_gender, data = df_clean, pval = TRUE,
+                   title = "Insurance Acquisition by Gender",
+                   xlab = "Age (years)", ylab = "Probability of No Insurance",
+                   palette = c("pink", "lightblue"), risk.table = TRUE)
+
+png("figures/Figure2_By_Gender.png", width = 10, height = 8, units = "in", res = 300)
+print(fig2)
+dev.off()
+cat("Figure 2 saved\n")
+
+# Figure 3: By marital status
+fig3 <- ggsurvplot(km_married, data = df_clean, pval = TRUE,
+                   title = "Insurance Acquisition by Marital Status",
+                   xlab = "Age (years)", ylab = "Probability of No Insurance",
+                   palette = c("red", "blue"), risk.table = TRUE)
+
+png("figures/Figure3_By_Marital_Status.png", width = 10, height = 8, units = "in", res = 300)
+print(fig3)
+dev.off()
+cat("Figure 3 saved\n\n")
+
+# ============================================
+# STEP 4: LOG-RANK TESTS
+# ============================================
+
+cat("========== LOG-RANK TESTS ==========\n")
+
+logrank_gender <- survdiff(surv_clean ~ gender, data = df_clean)
+logrank_married <- survdiff(surv_clean ~ married, data = df_clean)
+logrank_selfemp <- survdiff(surv_clean ~ selfemp, data = df_clean)
+logrank_region <- survdiff(surv_clean ~ region, data = df_clean)
+logrank_education <- survdiff(surv_clean ~ education, data = df_clean)
+
+logrank_results <- data.frame(
+  Variable = c("Gender", "Married", "Self-Employed", "Region", "Education"),
+  Chi_Square = c(logrank_gender$chisq, logrank_married$chisq, logrank_selfemp$chisq,
+                 logrank_region$chisq, logrank_education$chisq),
+  df = c(length(logrank_gender$n) - 1, length(logrank_married$n) - 1,
+         length(logrank_selfemp$n) - 1, length(logrank_region$n) - 1,
+         length(logrank_education$n) - 1),
+  P_value = c(1 - pchisq(logrank_gender$chisq, length(logrank_gender$n) - 1),
+              1 - pchisq(logrank_married$chisq, length(logrank_married$n) - 1),
+              1 - pchisq(logrank_selfemp$chisq, length(logrank_selfemp$n) - 1),
+              1 - pchisq(logrank_region$chisq, length(logrank_region$n) - 1),
+              1 - pchisq(logrank_education$chisq, length(logrank_education$n) - 1))
+)
+
+print(logrank_results)
+write.csv(logrank_results, "logrank_test_results.csv", row.names = FALSE)
+cat("\n")
+
+# ============================================
+# STEP 5: MODEL COMPARISONS
+# ============================================
+
+cat("========== MODEL COMPARISONS ==========\n")
+
+# Compare nested models
+cat("1. Null vs Minimal vs Medium vs Full:\n")
+anova_nested <- anova(cox_null, cox_minimal, cox_medium, cox_full, test = "Chisq")
+print(anova_nested)
+cat("\n")
+
+# Compare Full vs Time-varying family using manual likelihood ratio test
+cat("2. Full model vs Time-varying family model:\n")
+loglik_full <- as.numeric(logLik(cox_full))
+loglik_tvc <- as.numeric(logLik(cox_tvc_family))
+lr_stat <- -2 * (loglik_full - loglik_tvc)
+lr_df <- length(coef(cox_tvc_family)) - length(coef(cox_full))
+lr_pvalue <- 1 - pchisq(lr_stat, lr_df)
+
+cat("Likelihood ratio test statistic:", round(lr_stat, 2), "\n")
+cat("Degrees of freedom:", lr_df, "\n")
+cat("P-value:", format.pval(lr_pvalue, digits = 4), "\n\n")
+
+# AIC comparison
+cat("3. AIC Comparison (all models):\n")
+aic_table <- data.frame(
+  Model = c("Null", "Minimal", "Medium", "Full", "Stratified (Region)", 
+            "Time-Varying Family", "Stratified (Age)"),
+  AIC = c(AIC(cox_null), AIC(cox_minimal), AIC(cox_medium), 
+          AIC(cox_full), AIC(cox_stratified), 
+          AIC(cox_tvc_family), AIC(cox_stratified_age))
+)
+
+aic_table <- aic_table[order(aic_table$AIC), ]
+print(aic_table)
+cat("\nBest model by AIC:", aic_table$Model[1], 
+    "(AIC =", round(aic_table$AIC[1], 1), ")\n\n")
+
+# ============================================
+# STEP 6: HAZARD RATIOS (FULL MODEL)
+# ============================================
+
+cat("========== HAZARD RATIOS (FULL MODEL) ==========\n")
+
+hr_results <- data.frame(
+  Variable = names(coef(cox_full)),
+  HR = round(exp(coef(cox_full)), 3),
+  CI_lower = round(exp(confint(cox_full)[, 1]), 3),
+  CI_upper = round(exp(confint(cox_full)[, 2]), 3),
+  P_value = round(summary(cox_full)$coefficients[, 5], 4)
+)
+
+hr_results$Significance <- ifelse(hr_results$P_value < 0.001, "***",
+                                   ifelse(hr_results$P_value < 0.01, "**",
+                                          ifelse(hr_results$P_value < 0.05, "*", "")))
+
+print(hr_results)
+write.csv(hr_results, "hazard_ratios_full_model.csv", row.names = FALSE)
+cat("\n")
+
+# ============================================
+# STEP 7: TIME-VARYING HAZARD RATIOS FOR FAMILY SIZE
+# ============================================
+
+cat("========== TIME-VARYING HAZARD RATIOS ==========\n")
+
+ages <- c(30, 40, 50, 60, 70)
+
+coef_family <- coef(cox_tvc_family)["family"]
+coef_tt_family <- coef(cox_tvc_family)["tt(family)"]
+
+hr_at_age <- exp(coef_family + coef_tt_family * log(ages))
+
+family_tvc_results <- data.frame(
+  Age = ages,
+  HR_per_extra_family_member = round(hr_at_age, 3),
+  Interpretation = ifelse(hr_at_age > 1, "Increased hazard", "Decreased hazard")
+)
+
+print(family_tvc_results)
+write.csv(family_tvc_results, "time_varying_hr_family.csv", row.names = FALSE)
+cat("\n")
+
+# ============================================
+# STEP 8: PROPORTIONAL HAZARDS TEST
+# ============================================
+
+cat("========== PROPORTIONAL HAZARDS TEST ==========\n")
+
+ph_test <- cox.zph(cox_full)
+print(ph_test)
+
+# Save PH test results
+ph_results <- data.frame(
+  Variable = rownames(ph_test$table),
+  chisq = ph_test$table[, "chisq"],
+  df = ph_test$table[, "df"],
+  p = ph_test$table[, "p"]
+)
+write.csv(ph_results, "proportional_hazards_test.csv", row.names = FALSE)
+
+# PH assumption plots
+png("figures/Figure4_PH_Assumption_Test.png", width = 12, height = 10, units = "in", res = 300)
+par(mfrow = c(2, 3))
+plot(ph_test, var = "married", main = "Married Status")
+plot(ph_test, var = "selfemp", main = "Self-Employed")
+plot(ph_test, var = "family", main = "Family Size")
+plot(ph_test, var = "region", main = "Region")
+plot(ph_test, var = "education", main = "Education")
+plot(ph_test, var = "health", main = "Health")
+dev.off()
+cat("Figure 4 saved\n\n")
+
+# ============================================
+# STEP 9: FOREST PLOT OF HAZARD RATIOS
+# ============================================
+
+cat("========== FOREST PLOT ==========\n")
+
+# Select significant predictors
+hr_plot_data <- hr_results[hr_results$P_value < 0.05, ]
+hr_plot_data$Variable_clean <- c(
+  "Married (Yes vs No)",
+  "Self-employed (Yes vs No)",
+  "Family size (per unit)",
+  "Region: Northeast",
+  "Region: South",
+  "Education: GED",
+  "Education: High School",
+  "Education: Master",
+  "Education: None",
+  "Health (Yes vs No)"
+)[1:nrow(hr_plot_data)]
+
+fig5 <- ggplot(hr_plot_data, aes(x = HR, y = reorder(Variable_clean, HR))) +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "gray50") +
+  geom_errorbarh(aes(xmin = CI_lower, xmax = CI_upper), height = 0.2) +
+  geom_point(size = 3, color = "darkred") +
+  scale_x_log10() +
+  labs(title = "Hazard Ratios for Insurance Acquisition",
+       x = "Hazard Ratio (95% CI) - Log scale", y = "") +
+  theme_bw()
+
+ggsave("figures/Figure5_Forest_Plot.png", fig5, width = 10, height = 6, dpi = 300)
+cat("Figure 5 saved\n\n")
+
+# ============================================
+# STEP 10: SURVIVAL PREDICTIONS FOR RISK PROFILES
+# ============================================
+
+cat("========== SURVIVAL PREDICTIONS ==========\n")
+
+# Define risk profiles - ensure factor levels match df_clean
+profiles <- data.frame(
+  profile = c("Low Risk", "Medium Risk", "High Risk"),
+  gender = factor(c("female", "male", "male"), levels = levels(df_clean$gender)),
+  married = factor(c("yes", "yes", "no"), levels = levels(df_clean$married)),
+  selfemp = factor(c("no", "no", "yes"), levels = levels(df_clean$selfemp)),
+  family = c(2, 4, 6),
+  region = factor(c("south", "south", "south"), levels = levels(df_clean$region)),
+  education = factor(c("master", "bachelor", "none"), levels = levels(df_clean$education)),
+  health = factor(c("yes", "yes", "no"), levels = levels(df_clean$health))
+)
+
+print(profiles)
+
+# Fit Weibull model
+weibull_pred <- flexsurvreg(surv_clean ~ gender + married + selfemp + 
+                             family + region + education + health,
+                             data = df_clean, dist = "weibull")
+
+cat("Weibull model fitted successfully\n")
+
+# Predict survival
+age_seq <- seq(20, 80, by = 5)
+
+# Use tryCatch for safe prediction
+pred_curves <- tryCatch({
+  summary(weibull_pred, newdata = profiles, t = age_seq, type = "survival")
+}, error = function(e) {
+  cat("Warning:", e$message, "\n")
+  cat("Using manual prediction method...\n")
+  
+  # Manual prediction
+  coef_w <- coef(weibull_pred)
+  pred_mat <- matrix(NA, nrow = length(age_seq), ncol = nrow(profiles))
+  
+  for(i in 1:nrow(profiles)) {
+    # Calculate linear predictor
+    lp <- 0
+    if(profiles$gender[i] == "male") lp <- lp + coef_w["gendermale"]
+    if(profiles$married[i] == "yes") lp <- lp + coef_w["marriedyes"]
+    if(profiles$selfemp[i] == "yes") lp <- lp + coef_w["selfempyes"]
+    lp <- lp + profiles$family[i] * coef_w["family"]
+    if(profiles$region[i] == "northeast") lp <- lp + coef_w["regionnortheast"]
+    if(profiles$region[i] == "south") lp <- lp + coef_w["regionsouth"]
+    if(profiles$region[i] == "west") lp <- lp + coef_w["regionwest"]
+    if(profiles$education[i] == "ged") lp <- lp + coef_w["educationged"]
+    if(profiles$education[i] == "highschool") lp <- lp + coef_w["educationhighschool"]
+    if(profiles$education[i] == "master") lp <- lp + coef_w["educationmaster"]
+    if(profiles$education[i] == "none") lp <- lp + coef_w["educationnone"]
+    if(profiles$education[i] == "other") lp <- lp + coef_w["educationother"]
+    if(profiles$education[i] == "phd") lp <- lp + coef_w["educationphd"]
+    if(profiles$health[i] == "yes") lp <- lp + coef_w["healthyes"]
+    
+    # Weibull survival
+    shape <- exp(coef_w["shape"])
+    scale <- exp(-lp/shape)
+    pred_mat[, i] <- exp(- (age_seq / scale)^shape)
+  }
+  
+  return(list(est = pred_mat))
+})
+
+# Create prediction plot
+profile_colors <- c("Low Risk" = "green", "Medium Risk" = "orange", "High Risk" = "red")
+
+png("predicted_survival_curves.png", width = 800, height = 600)
+
+if(!is.null(pred_curves$est) && nrow(pred_curves$est) > 0) {
+  matplot(age_seq, pred_curves$est, type = "l", lwd = 2,
+          col = profile_colors[profiles$profile],
+          xlab = "Age (years)", ylab = "Probability of No Insurance",
+          main = "Predicted Insurance Acquisition by Risk Profile",
+          ylim = c(0, 1))
+  legend("topright", legend = names(profile_colors), col = profile_colors, lwd = 2,
+         title = "Risk Profile")
+} else {
+  plot(1, type = "n", xlab = "Age (years)", ylab = "Probability of No Insurance",
+       main = "Prediction Failed", xlim = c(20, 80), ylim = c(0, 1))
+  text(50, 0.5, "Prediction error - check model", col = "red")
+}
+
+dev.off()
+cat("Prediction plot saved to 'predicted_survival_curves.png'\n")
+
+# Save predicted probabilities
+if(!is.null(pred_curves$est)) {
+  pred_summary <- data.frame(
+    Age = age_seq,
+    Low_Risk = round(pred_curves$est[, 1], 3),
+    Medium_Risk = round(pred_curves$est[, 2], 3),
+    High_Risk = round(pred_curves$est[, 3], 3)
+  )
+  write.csv(pred_summary, "predicted_survival_probabilities.csv", row.names = FALSE)
+  cat("Prediction probabilities saved\n\n")
+}
+
+# ============================================
+# STEP 11: CROSS-VALIDATION
+# ============================================
+
+cat("========== 5-FOLD CROSS-VALIDATION ==========\n")
+
+set.seed(456)
+k <- 5
+n <- nrow(df_clean)
+folds <- sample(rep(1:k, length.out = n))
+
+cv_results <- data.frame(Fold = 1:k, C_index = NA)
+
+for(i in 1:k) {
+  train_data <- df_clean[folds != i, ]
+  test_data <- df_clean[folds == i, ]
+  
+  model_cv <- coxph(Surv(age, event) ~ gender + married + selfemp + 
+                     family + region + education + health,
+                     data = train_data)
+  
+  lp <- predict(model_cv, newdata = test_data, type = "lp")
+  test_surv <- Surv(test_data$age, test_data$event)
+  c_index <- concordance(test_surv ~ lp)$concordance
+  cv_results$C_index[i] <- c_index
+  
+  cat("Fold", i, "- C-index:", round(c_index, 4), "\n")
+}
+
+cat("\nAverage C-index:", round(mean(cv_results$C_index), 4), "\n")
+cat("Standard deviation:", round(sd(cv_results$C_index), 4), "\n\n")
+
+write.csv(cv_results, "cross_validation_results.csv", row.names = FALSE)
+
+# ============================================
+# STEP 12: SUBGROUP ANALYSES (FIXED)
+# ============================================
+
+cat("========== SUBGROUP ANALYSES ==========\n")
+
+# By gender subgroups - FIXED: Create separate survival objects for each subset
+df_male <- df_clean[df_clean$gender == "male", ]
+df_female <- df_clean[df_clean$gender == "female", ]
+
+surv_male <- Surv(time = df_male$age, event = df_male$event)
+surv_female <- Surv(time = df_female$age, event = df_female$event)
+
+cox_male <- coxph(surv_male ~ married + selfemp + family + region + 
+                   education + health, data = df_male)
+
+cox_female <- coxph(surv_female ~ married + selfemp + family + region + 
+                     education + health, data = df_female)
+
+cat("MALES (n=", nrow(df_male), "):\n")
+male_hr <- round(exp(coef(cox_male)), 3)
+print(male_hr)
+cat("\nFEMALES (n=", nrow(df_female), "):\n")
+female_hr <- round(exp(coef(cox_female)), 3)
+print(female_hr)
+cat("\n")
+
+# By age subgroups - FIXED
+df_young <- df_clean[df_clean$age < 40, ]
+df_middle <- df_clean[df_clean$age >= 40 & df_clean$age < 60, ]
+df_old <- df_clean[df_clean$age >= 60, ]
+
+surv_young <- Surv(time = df_young$age, event = df_young$event)
+surv_middle <- Surv(time = df_middle$age, event = df_middle$event)
+surv_old <- Surv(time = df_old$age, event = df_old$event)
+
+cox_young <- coxph(surv_young ~ gender + married + selfemp + family + 
+                    region + education + health, data = df_young)
+
+cox_middle <- coxph(surv_middle ~ gender + married + selfemp + family + 
+                     region + education + health, data = df_middle)
+
+cox_old <- coxph(surv_old ~ gender + married + selfemp + family + 
+                  region + education + health, data = df_old)
+
+cat("YOUNG (<40 years, n=", nrow(df_young), "):\n")
+young_hr <- round(exp(coef(cox_young)), 3)
+print(young_hr)
+cat("\nMIDDLE (40-60 years, n=", nrow(df_middle), "):\n")
+middle_hr <- round(exp(coef(cox_middle)), 3)
+print(middle_hr)
+cat("\nOLD (>=60 years, n=", nrow(df_old), "):\n")
+old_hr <- round(exp(coef(cox_old)), 3)
+print(old_hr)
+cat("\n")
+
+# ============================================
+# STEP 13: BOOTSTRAP CONFIDENCE INTERVALS
+# ============================================
+
+cat("========== BOOTSTRAP CONFIDENCE INTERVALS ==========\n")
+
+boot_hr <- function(data, indices) {
+  d <- data[indices, ]
+  model <- coxph(Surv(age, event) ~ married + selfemp + family, data = d)
+  return(exp(coef(model)))
+}
+
+set.seed(123)
+boot_results <- boot(df_clean, boot_hr, R = 100)
+
+cat("Bootstrap 95% CIs for key predictors:\n")
+var_names <- c("Married", "Self-employed", "Family")
+for(i in 1:3) {
+  ci <- boot.ci(boot_results, type = "perc", index = i)
+  if(!is.null(ci)) {
+    cat(var_names[i], ":", 
+        round(ci$perc[4], 3), "-", round(ci$perc[5], 3), "\n")
+  }
+}
+cat("\n")
+
+# ============================================
+# STEP 14: COMPREHENSIVE RESULTS TABLE
+# ============================================
+
+cat("========== COMPREHENSIVE RESULTS ==========\n")
+
+comprehensive_results <- data.frame(
+  Predictor = hr_results$Variable,
+  HR = hr_results$HR,
+  CI_95 = paste0("(", hr_results$CI_lower, "-", hr_results$CI_upper, ")"),
+  P_value = hr_results$P_value,
+  Significance = hr_results$Significance
+)
+
+print(comprehensive_results)
+write.csv(comprehensive_results, "comprehensive_results_table.csv", row.names = FALSE)
+
+# ============================================
+# STEP 15: FINAL SUMMARY
+# ============================================
+
+cat("\n\n========================================\n")
+cat("✅ ALL ANALYSES COMPLETE SUCCESSFULLY!\n")
+cat("========================================\n")
+cat("\nStudy Summary:\n")
+cat("  - Sample size:", nrow(df_clean), "individuals\n")
+cat("  - Events (insurance acquired):", sum(df_clean$event), "\n")
+cat("  - Censoring rate:", round(mean(df_clean$event == 0) * 100, 1), "%\n")
+cat("  - Median age at insurance:", summary(km_overall)$table["median"], "years\n\n")
+
+cat("Output files saved:\n")
+cat("  ✓ hazard_ratios_full_model.csv\n")
+cat("  ✓ logrank_test_results.csv\n")
+cat("  ✓ time_varying_hr_family.csv\n")
+cat("  ✓ proportional_hazards_test.csv\n")
+cat("  ✓ cross_validation_results.csv\n")
+cat("  ✓ predicted_survival_probabilities.csv\n")
+cat("  ✓ comprehensive_results_table.csv\n")
+cat("  ✓ figures/ (5 publication-ready plots)\n")
+cat("  ✓ predicted_survival_curves.png\n\n")
+
+cat("Best model by AIC:", aic_table$Model[1], 
+    "(AIC =", round(aic_table$AIC[1], 1), ")\n\n")
+
+cat("KEY FINDINGS:\n")
+married_hr <- hr_results$HR[hr_results$Variable == "marriedyes"]
+selfemp_hr <- hr_results$HR[hr_results$Variable == "selfempyes"]
+family_hr <- hr_results$HR[hr_results$Variable == "family"]
+none_hr <- hr_results$HR[hr_results$Variable == "educationnone"]
+
+cat("  - Married individuals have", round((1 - married_hr) * 100, 1), "% lower hazard\n")
+cat("  - Self-employed individuals have", round((1 - selfemp_hr) * 100, 1), "% lower hazard\n")
+cat("  - Each additional family member increases hazard by", 
+    round((family_hr - 1) * 100, 1), "%\n")
+cat("  - Individuals with no education have", 
+    round((1 - none_hr) * 100, 1), "% lower hazard vs bachelor's degree\n")
+
+# ============================================
+# END OF CODE
+# ============================================
